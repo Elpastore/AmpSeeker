@@ -56,6 +56,23 @@ rule tabix:
         """
 
 
+def merge_gvcf_flag(wildcards):
+    """
+    Nanopore amplicon calls are masked clair3 gVCFs, and must be merged in gVCF mode so that
+    covered wild-type samples get 0/0 and samples with no data stay ./.
+    """
+    if config["platform"] == "nanopore" and wildcards.call_type == "amplicons":
+        return "-g " + config["reference-fasta"]
+    return ""
+
+
+def merge_view_flags(wildcards):
+    """Drop gVCF reference blocks and the <NON_REF> allele from the final merged VCF."""
+    if config["platform"] == "nanopore" and wildcards.call_type == "amplicons":
+        return "-a -i 'ALT!=\"<NON_REF>\"'"
+    return ""
+
+
 # bcftools merge cannot take >1000 input files at once (see common.smk, where
 # `large_sample_size` and the samples1/samples2 split are computed), so datasets
 # above that threshold are merged in two rounds (merge1 + merge2, each bgzipped/
@@ -79,62 +96,75 @@ rule tabix:
 #     duplicate sample names fail (or are handled) the same way on both paths.
 if not large_sample_size:
 
-rule bcftools_merge:
-    input:
-        vcfs=expand("results/vcfs/{{call_type}}/{sample}.calls.vcf.gz", sample=samples),
-        idx=expand(
-            "results/vcfs/{{call_type}}/{sample}.calls.vcf.gz.tbi", sample=samples
-        ),
-    output:
-        vcf="results/vcfs/{call_type}/{dataset}.merged.vcf",
-    log:
-        "logs/bcftools/{call_type}/merge_{dataset}.log",
-    conda:
-        "../envs/AmpSeeker-cli.yaml"
-    threads: 12
-    shell:
-        """
-        bcftools merge --threads {threads} -o {output.vcf} -O v {input.vcfs} --force-samples 2> {log}
-        """
+    rule bcftools_merge:
+        input:
+            vcfs=expand(
+                "results/vcfs/{{call_type}}/{sample}.calls.vcf.gz", sample=samples
+            ),
+            idx=expand(
+                "results/vcfs/{{call_type}}/{sample}.calls.vcf.gz.tbi", sample=samples
+            ),
+        output:
+            vcf="results/vcfs/{call_type}/{dataset}.merged.vcf",
+        log:
+            "logs/bcftools/{call_type}/merge_{dataset}.log",
+        conda:
+            "../envs/AmpSeeker-cli.yaml"
+        params:
+            gvcf=merge_gvcf_flag,
+            view=merge_view_flags,
+        threads: 12
+        shell:
+            """
+            bcftools merge {params.gvcf} --threads {threads} -O u {input.vcfs} --force-samples 2> {log} |
+                bcftools view {params.view} -O v -o {output.vcf} 2>> {log}
+            """
 
 else:
 
-rule bcftools_merge1:
-    input:
-        vcfs=expand("results/vcfs/{call_type}/{sample}.calls.vcf.gz", sample=samples1),
-        idx=expand(
-            "results/vcfs/{call_type}/{sample}.calls.vcf.gz.tbi", sample=samples1
-        ),
-    output:
-        vcf="results/vcfs/{call_type}/{dataset}.1.vcf",
-    log:
-        "logs/bcftools/{call_type}/merge1_{dataset}.log",
-    conda:
-        "../envs/AmpSeeker-cli.yaml"
-    threads: 12
-    shell:
-        """
-        bcftools merge --threads {threads} -o {output.vcf} -O v {input.vcfs} 2> {log}
-        """
+    rule bcftools_merge1:
+        input:
+            vcfs=expand(
+                "results/vcfs/{{call_type}}/{sample}.calls.vcf.gz", sample=samples1
+            ),
+            idx=expand(
+                "results/vcfs/{{call_type}}/{sample}.calls.vcf.gz.tbi", sample=samples1
+            ),
+        output:
+            vcf="results/vcfs/{call_type}/{dataset}.1.vcf",
+        log:
+            "logs/bcftools/{call_type}/merge1_{dataset}.log",
+        conda:
+            "../envs/AmpSeeker-cli.yaml"
+        params:
+            gvcf=merge_gvcf_flag,
+        threads: 12
+        shell:
+            """
+            bcftools merge {params.gvcf} --threads {threads} -o {output.vcf} -O v {input.vcfs} --force-samples 2> {log}
+            """
 
-
-rule bcftools_merge2:
-    input:
-        vcfs=expand("results/vcfs/{call_type}/{sample}.calls.vcf.gz", sample=samples2),
-        idx=expand(
-            "results/vcfs/{call_type}/{sample}.calls.vcf.gz.tbi", sample=samples2
-        ),
-    output:
-        vcf="results/vcfs/{call_type}/{dataset}.2.vcf",
-    log:
-        "logs/bcftools/{call_type}/merge2_{dataset}.log",
-    conda:
-        "../envs/AmpSeeker-cli.yaml"
-    threads: 12
-    shell:
-        """
-        bcftools merge --threads {threads} -o {output.vcf} -O v {input.vcfs} 2> {log}
-        """
+    rule bcftools_merge2:
+        input:
+            vcfs=expand(
+                "results/vcfs/{{call_type}}/{sample}.calls.vcf.gz", sample=samples2
+            ),
+            idx=expand(
+                "results/vcfs/{{call_type}}/{sample}.calls.vcf.gz.tbi", sample=samples2
+            ),
+        output:
+            vcf="results/vcfs/{call_type}/{dataset}.2.vcf",
+        log:
+            "logs/bcftools/{call_type}/merge2_{dataset}.log",
+        conda:
+            "../envs/AmpSeeker-cli.yaml"
+        params:
+            gvcf=merge_gvcf_flag,
+        threads: 12
+        shell:
+            """
+            bcftools merge {params.gvcf} --threads {threads} -o {output.vcf} -O v {input.vcfs} --force-samples 2> {log}
+            """
 
     rule bgzip2:
         input:
@@ -160,19 +190,24 @@ rule bcftools_merge2:
             tabix {input.vcfgz} 2> {log}
             """
 
-
-rule bcftools_merge3:
-    input:
-        vcf=expand("results/vcfs/{{call_type}}/{{dataset}}.{n}.vcf.gz", n=[1, 2]),
-        tbi=expand("results/vcfs/{{call_type}}/{{dataset}}.{n}.vcf.gz.tbi", n=[1, 2]),
-    output:
-        vcf="results/vcfs/{call_type}/{dataset}.merged.vcf",
-        holder=touch("results/vcfs/{call_type}/.complete.{dataset}.merge_vcfs"),
-    log:
-        "logs/bcftools/{call_type}/merge3_{dataset}.log",
-    conda:
-        "../envs/AmpSeeker-cli.yaml"
-    shell:
-        """
-        bcftools merge -o {output.vcf} -Ov {input.vcf} 2> {log}
-        """
+    rule bcftools_merge3:
+        input:
+            vcf=expand("results/vcfs/{{call_type}}/{{dataset}}.{n}.vcf.gz", n=[1, 2]),
+            tbi=expand(
+                "results/vcfs/{{call_type}}/{{dataset}}.{n}.vcf.gz.tbi", n=[1, 2]
+            ),
+        output:
+            vcf="results/vcfs/{call_type}/{dataset}.merged.vcf",
+            holder=touch("results/vcfs/{call_type}/.complete.{dataset}.merge_vcfs"),
+        log:
+            "logs/bcftools/{call_type}/merge3_{dataset}.log",
+        conda:
+            "../envs/AmpSeeker-cli.yaml"
+        params:
+            gvcf=merge_gvcf_flag,
+            view=merge_view_flags,
+        shell:
+            """
+            bcftools merge {params.gvcf} -Ou {input.vcf} --force-samples 2> {log} |
+                bcftools view {params.view} -O v -o {output.vcf} 2>> {log}
+            """
