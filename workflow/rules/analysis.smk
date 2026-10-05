@@ -112,6 +112,8 @@ rule snp_dataframe:
         "../envs/AmpSeeker-python.yaml"
     log:
         "logs/notebooks/snp-dataframe.log",
+    resources:
+        mem_mb=48000,
     params:
         dataset=dataset,
         wkdir=wkdir,

@@ -4,7 +4,10 @@ channels:
   - conda-forge
   - anaconda
 dependencies:
-  - python=3.9
+  # Snakemake's wrapper mechanism runs this env's own python to import
+  # snakemake's modules (which use PEP 604 "X | Y" union syntax internally),
+  # so this must be >=3.10 regardless of what fastqc/multiqc themselves need.
+  - python=3.12
   - fastqc
   - pip 
   - pip:

@@ -1,0 +1,43 @@
+# Dataset and panel information
+dataset: agvampir-eniyou-agam
+panel: ag-vampir
+platform: illumina
+cohort-columns:
+  - location
+  - country
+  - population
+targets: config/ag-vampir.bed
+metadata: config/metadata.tsv
+# Illumina directory (using the MiSeq output)
+illumina-dir: ""  #resources/251211_M08382_0055_000000000-M783V
+
+# Reference genome information
+reference-fasta: resources/reference/resources/reference/AgamP4.fa
+reference-gff3: resources/reference/resources/reference/AgamP4.gff
+reference-snpeffdb: Anopheles_gambiae
+custom-snpeffdb: False
+
+# Input file type options
+from-bcl: False
+fastq:
+  auto: False
+
+# Quality control options
+quality-control:
+  sample-min-mean-target-coverage: 5
+  sample-total-reads-threshold: 250
+  amplicon-total-reads-threshold: 1000
+  fastp: True
+  coverage: True
+  stats: True
+  multiqc: True
+
+# Analysis options
+analysis:
+  sample-map: True
+  population-structure: True
+  genetic-diversity: True
+  allele-frequencies: True
+
+# Build Jupyter book
+build-jupyter-book: True

@@ -1,0 +1,24 @@
+format: jb-book
+parts:
+- caption: Sequencing and workflow
+  chapters:
+  - file: notebooks/run-information
+  - file: notebooks/run-statistics
+- caption: Quality control
+  chapters:
+  - file: notebooks/read-quality
+  - file: notebooks/reads-per-well
+  - file: notebooks/sample-quality-control
+- caption: Results
+  chapters:
+  - file: notebooks/sample-map
+  - file: notebooks/coverage
+  - file: notebooks/population-structure
+  - file: notebooks/snp-dataframe
+  - file: notebooks/genetic-diversity
+  - file: notebooks/allele-frequencies
+- caption: Ag-vampIR
+  chapters:
+  - file: notebooks/ag-vampir/species-id
+  - file: notebooks/ag-vampir/kdr-analysis
+root: intro

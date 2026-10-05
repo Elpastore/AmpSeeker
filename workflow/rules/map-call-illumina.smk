@@ -130,10 +130,18 @@ rule mpileup_call_amplicons:
         "../envs/AmpSeeker-cli.yaml"
     params:
         ref=config["reference-fasta"],
+        # Without -R this pileups every covered base genome-wide instead of
+        # just the panel. At 1631 samples that produced a 25GB, 2.5M-record
+        # VCF that OOM-kills downstream notebooks loading it in full.
+        # config["targets"] is the only panel region file in this repo (exact
+        # SNP positions); swap in a padded amplicon-insert BED here if/when
+        # one becomes available, to keep the wider "whole-amplicon" scope
+        # this rule is meant to have.
+        regions=config["targets"],
         depth=2000,
     shell:
         """
-        bcftools mpileup -Ov -I -f {params.ref} -a AD --max-depth {params.depth} {input.bam} 2> {log.mpileup} |
+        bcftools mpileup -Ov -I -f {params.ref} -R {params.regions} -a AD --max-depth {params.depth} {input.bam} 2> {log.mpileup} |
         bcftools call -m --ploidy-file {input.ploidy_file} -Ov 2> {log.call} | bcftools sort -Ov -o {output.calls} 2> {log.call}
         """
 

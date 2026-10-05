@@ -237,15 +237,18 @@ def pca(geno, metadata, n_components = 3, query=None, missing_threshold=0.05):
     gn_var = np.compress(loc_var, gn_alt, axis=0)
     
     coords, model = allel.pca(gn_var, n_components=n_components)
+    # allel.pca can return fewer components than requested for cohorts with
+    # too few segregating/informative sites -- use what it actually gave us.
+    n_components_out = coords.shape[1]
 
-    # flip axes back so PC1 is same orientation in each window 
-    for i in range(n_components):
+    # flip axes back so PC1 is same orientation in each window
+    for i in range(n_components_out):
         c = coords[:, i]
-    if np.abs(c.min()) > np.abs(c.max()):
-        coords[:, i] = c * -1
-    
+        if np.abs(c.min()) > np.abs(c.max()):
+            coords[:, i] = c * -1
+
     pca_df = pd.DataFrame(coords)
-    pca_df.columns = [f"PC{pc+1}" for pc in range(n_components)]
+    pca_df.columns = [f"PC{pc+1}" for pc in range(n_components_out)]
     pca_df = pd.concat([metadata.reset_index(drop=True), pca_df], axis=1)
     
     return pca_df, model

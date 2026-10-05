@@ -107,5 +107,7 @@ rule multi_qc:
         "logs/multiqc/multiqc.log",
     conda:
         "../envs/AmpSeeker-qc.yaml"
+    resources:
+        mem_mb=8000,
     wrapper:
         "v2.2.1/bio/multiqc"

@@ -131,6 +131,8 @@ rule coverage:
         "../envs/AmpSeeker-python.yaml"
     log:
         "logs/notebooks/coverage.log",
+    resources:
+        mem_mb=16000,
     params:
         wkdir=wkdir,
     shell:
@@ -162,6 +164,8 @@ rule sample_quality_control:
         "../envs/AmpSeeker-python.yaml"
     log:
         "logs/notebooks/sample-quality-control.log",
+    resources:
+        mem_mb=48000,
     params:
         wkdir=wkdir,
         cohort_cols=cohort_cols,
