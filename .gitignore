@@ -28,3 +28,25 @@ workflow/notebooks/misc
 ms_results/
 misc/
 old*/
+
+# --- Local run data / outputs (elpastore-dev) ---
+# Large local resources and reference data
+ressources/
+*.tar.gz
+*.zip
+# Pipeline results and reports
+results/
+AmpSeeker-results.html
+*-results.html
+# Logs and SLURM job output
+logs/
+*.out
+*.error
+# Local metadata backups
+config/metadata_backup*.tsv
+# Files copied into the test dir during test runs
+tests/snakemake/workflow/
+tests/snakemake/docs/
+tests/snakemake/resources/ag-vampir/
+tests/snakemake/resources/reference/
+tests/snakemake/config/ag-vampir.bed
