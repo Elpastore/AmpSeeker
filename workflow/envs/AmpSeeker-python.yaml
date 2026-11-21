@@ -1,8 +1,7 @@
 name: AmpSeeker-python
 channels:
-  - bioconda
   - conda-forge
-  - anaconda
+  - bioconda
 dependencies:
   - python>=3.10,<3.13
   - numpy

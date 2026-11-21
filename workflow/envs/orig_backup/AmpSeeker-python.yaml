@@ -1,0 +1,23 @@
+name: AmpSeeker-python
+channels:
+  - bioconda
+  - conda-forge
+  - anaconda
+dependencies:
+  - python>=3.10,<3.13
+  - numpy
+  - pandas==2.1.4
+  - ipykernel
+  - plotly==5.24.1
+  - scipy 
+  - ipyleaflet
+  - openpyxl
+  - scikit-learn
+  - xgboost
+  - pip 
+  - pip:
+    - papermill
+    - scikit-allel
+    - pysam
+    - anjl
+    - kaleido<1

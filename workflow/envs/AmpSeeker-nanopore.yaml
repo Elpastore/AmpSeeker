@@ -1,8 +1,7 @@
 name: AmpSeeker-nanopore
 channels:
-  - bioconda
   - conda-forge
-  - defaults
+  - bioconda
 dependencies:
   # Core tools
   - python

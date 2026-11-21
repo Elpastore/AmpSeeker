@@ -17,7 +17,7 @@ mkdir -p logs
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate ampseeker
 
-cd /mnt/beegfs/projects/vector_malariagen_data/amplicon_data/AmpSeeker
+cd /mnt/nas2/Moussa_Amplicon/AmpSeeker
 
 # Clears any stale lock left by a previous run that died uncleanly (killed
 # job, node reboot, timeout). Safe here because this job only runs once
@@ -26,9 +26,9 @@ cd /mnt/beegfs/projects/vector_malariagen_data/amplicon_data/AmpSeeker
 # (check `squeue -u asadio` first if submitting manually).
 echo "${SLURM_CPUS_PER_TASK}"
 snakemake --cores "${SLURM_CPUS_PER_TASK}" --use-conda \
-  --configfile config/eniyou_agam.yaml --unlock
+  --configfile config/moussa_agam.yaml --unlock
 
 snakemake --cores "${SLURM_CPUS_PER_TASK}" --use-conda \
-  --configfile config/eniyou_agam.yaml \
+  --configfile config/moussa_agam.yaml \
   --resources mem_mb=90000 \
   --rerun-incomplete --keep-going

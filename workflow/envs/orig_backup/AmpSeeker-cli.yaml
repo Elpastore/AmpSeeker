@@ -1,0 +1,13 @@
+name: AmpSeeker-cli
+channels:
+  - bioconda
+  - conda-forge
+  - anaconda
+dependencies:
+  - python=3.9
+  - samtools>=1.10
+  - htslib>=1.10
+  - tabix
+  - bwa
+  - bcftools
+  - mosdepth<0.3.11

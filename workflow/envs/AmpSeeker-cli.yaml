@@ -1,8 +1,7 @@
 name: AmpSeeker-cli
 channels:
-  - bioconda
   - conda-forge
-  - anaconda
+  - bioconda
 dependencies:
   - python=3.9
   - samtools>=1.10

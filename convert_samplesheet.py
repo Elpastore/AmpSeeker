@@ -5,34 +5,52 @@
 # Input:   Illumina SampleSheet.csv (with [Header]/[Data] sections) +
 #          a model/example samplesheet defining the target column set
 # Output:  Reformatted CSV in AmpSeeker's expected format; original is backed up
+#          to backup_<name> (never overwritten once it exists).
 # Dependencies: pandas
+#
+# Example:
+#   python convert_samplesheet.py -i ../MACARD-1/<run>/SampleSheet.csv \
+#       -m resources/exampleSampleSheet.csv
+#
+# The normalisation logic (normalise_columns / to_ampseeker_frame) is also
+# imported by build_multirun_metadata.py so both scripts read sheets the
+# same way.
 
 import argparse
+import re
 import shutil
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-# Illumina column name -> AmpSeeker column name
+# Illumina column name (any case) -> AmpSeeker column name.
 COLUMN_RENAME = {
-    "Sample_ID": "sample_id",
-    "Sample_Name": "sample_name",
-    "Sample_Plate": "plate_name",
-    "Sample_Well": "well",
+    "sample_id": "sample_id",
+    "sample_name": "sample_name",
+    "sample_plate": "plate_name",
+    "sample_well": "well",
+    # bcl2fastq matches column names case-insensitively, so a lowercase
+    # 'sample_project' would still make it write FASTQs into a
+    # per-project subfolder. 'project' is ignored by bcl2fastq.
+    "sample_project": "project",
 }
 
-# Columns AmpSeeker expects but that Illumina sheets don't provide;
+# Columns AmpSeeker expects but that Illumina sheets may not provide;
 # added blank so the user can fill them in by hand.
 METADATA_COLUMNS = ["taxon", "location", "country", "latitude", "longitude"]
+
+# Extra (non-model) columns that are dropped even with --keep-extra because
+# they only duplicate another column.
+DROP_EXTRA = {"i7_index_id", "i5_index_id"}
 
 
 def read_samplesheet(path: Path):
     """Read an Illumina SampleSheet and return (header_lines, DataFrame).
 
     Uses utf-8-sig so a leading UTF-8 BOM (common in Illumina-exported
-    sheets) is stripped rather than silently embedded in the first header
-    line, where it can break exact-match parsing downstream.
+    sheets) is stripped. Every value is read as a string so IDs such as
+    plate '03' or well 'A01' are not silently turned into numbers.
     """
     with open(path, encoding="utf-8-sig") as f:
         lines = f.readlines()
@@ -50,20 +68,25 @@ def read_samplesheet(path: Path):
         )
 
     header = lines[:data_start]
-    df = pd.read_csv(path, skiprows=data_start, encoding="utf-8-sig")
-    return header, df
+    df = pd.read_csv(path, skiprows=data_start, encoding="utf-8-sig",
+                     dtype=str, keep_default_na=False)
+    # Drop fully-empty trailing rows/columns (Excel padding).
+    df = df.loc[:, [c for c in df.columns if not str(c).startswith("Unnamed:")
+                    or df[c].str.strip().ne("").any()]]
+    df = df[df.apply(lambda r: r.str.strip().ne("").any(), axis=1)]
+    df = df.apply(lambda s: s.str.strip())
+    return header, df.reset_index(drop=True)
+
+
+def snake(name: str) -> str:
+    """'Sample_ID' -> 'sample_id', 'Collection Date' -> 'collection_date'."""
+    return re.sub(r"[^0-9a-z]+", "_", str(name).strip().lower()).strip("_")
 
 
 def pad_line_to_width(line: str, width: int) -> str:
-    """Pad a raw header line's comma-separated fields with trailing empty
-    fields until it has `width` fields total.
-
-    Mirrors what Excel/Numbers does automatically when it opens a ragged
-    CSV and saves it back out: it treats the sheet as a rectangular grid
-    sized to its widest row and pads every shorter row with empty cells.
-    Only pads (never truncates), so a header line that's already wider
-    than `width` is left untouched.
-    """
+    """Pad a raw header line with trailing empty fields up to `width`
+    fields (never truncates). Mirrors what Excel does when it re-saves a
+    ragged CSV."""
     stripped = line.rstrip("\n").rstrip("\r")
     fields = stripped.split(",")
     if len(fields) < width:
@@ -72,23 +95,9 @@ def pad_line_to_width(line: str, width: int) -> str:
 
 
 def write_samplesheet(path: Path, header, df: pd.DataFrame, pad_width: int = None):
-    """Write the SampleSheet back out with original header + new data rows.
-
-    encoding='utf-8' (no BOM) keeps the output byte-for-byte plain ASCII/UTF-8.
-    newline='' hands full control of line endings to the csv writer inside
-    df.to_csv(); without it, Python's own text-mode newline translation and
-    the csv writer's newline insertion can disagree, producing a file with
-    mixed \\r\\n / \\n line endings that some CSV parsers reject outright
-    (this is a well-known pandas gotcha, not specific to this script).
-    lineterminator='\\n' then makes every line in the file consistently
-    LF-only, matching a standard Linux/HPC text file.
-
-    If pad_width is given, every preserved header line (including blank
-    lines and the '[Data]' marker itself) is padded with trailing commas
-    out to that many fields, so the whole file is a rectangular grid —
-    matching what AmpSeeker's parser expects and what Excel produces when
-    it re-saves a ragged CSV.
-    """
+    """Write the SampleSheet back out with original header + new data rows,
+    LF line endings, no BOM. With pad_width, header lines are padded to a
+    rectangular grid (what AmpSeeker's [Data] regex expects)."""
     if pad_width:
         header = [pad_line_to_width(line, pad_width) for line in header]
     with open(path, "w", encoding="utf-8", newline="") as f:
@@ -113,50 +122,37 @@ def parse_rename_arg(rename_str: str) -> dict:
 
 
 def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse columns that share a name after renaming, if their values agree.
+    """Collapse columns that share a name after renaming.
 
-    Raises if two same-named columns disagree, since silently picking one
-    would risk writing the wrong sample metadata.
+    Values are merged cell by cell: a blank cell takes the other column's
+    value. Raises only if two non-blank values actually disagree, since
+    silently picking one would risk writing the wrong sample metadata.
     """
     dupe_names = df.columns[df.columns.duplicated()].unique().tolist()
     if not dupe_names:
         return df
 
+    merged = {}
     for name in dupe_names:
-        cols = df.loc[:, df.columns == name]
-        first = cols.iloc[:, 0]
+        cols = df.loc[:, df.columns == name].astype(str)
+        result = cols.iloc[:, 0].copy()
         for j in range(1, cols.shape[1]):
             other = cols.iloc[:, j]
-            if not first.astype(str).fillna("").equals(other.astype(str).fillna("")):
-                mismatches = first.astype(str) != other.astype(str)
+            conflict = result.ne("") & other.ne("") & result.ne(other)
+            if conflict.any():
                 raise ValueError(
                     f"Column '{name}' appears {cols.shape[1]} times after renaming "
-                    f"with conflicting values in {mismatches.sum()} row(s). "
+                    f"with conflicting values in {conflict.sum()} row(s). "
                     "Fix the source sheet or adjust --rename so these map to distinct names."
                 )
-    # All duplicate groups agreed — keep just the first occurrence of each.
-    df = df.loc[:, ~df.columns.duplicated(keep="first")]
-    print(f"Note: collapsed duplicate column(s) with matching values: {dupe_names}")
+            result = result.where(result.ne(""), other)
+        merged[name] = result
+
+    df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
+    for name, values in merged.items():
+        df[name] = values
+    print(f"Note: merged duplicate column(s): {dupe_names}")
     return df
-
-
-def match_case_insensitive(df_columns, ref_cols):
-    """Map each ref_col to the actual df column name, ignoring case.
-
-    Returns (rename_map, missing) where rename_map maps the df's current
-    column name -> the model sheet's exact spelling, and missing lists any
-    ref_cols with no match at all (case-insensitive) in df_columns.
-    """
-    lower_lookup = {c.lower(): c for c in df_columns}
-    rename_map = {}
-    missing = []
-    for ref_col in ref_cols:
-        match = lower_lookup.get(ref_col.lower())
-        if match is None:
-            missing.append(ref_col)
-        else:
-            rename_map[match] = ref_col
-    return rename_map, missing
 
 
 def find_col(df_columns, target_lower: str):
@@ -167,37 +163,107 @@ def find_col(df_columns, target_lower: str):
     return None
 
 
-def apply_sample_name_from_id(df: pd.DataFrame) -> pd.DataFrame:
-    """Overwrite the sample_name column's values with the sample_id column's values.
+def normalise_columns(df: pd.DataFrame, extra_rename: dict = None) -> pd.DataFrame:
+    """Rename every column to AmpSeeker's lowercase snake_case naming.
 
-    Used when Sample_Name in the raw sheet is blank/unreliable and the
-    meaningful identifier actually lives in Sample_ID.
+    - Illumina names (Sample_ID, Sample_Plate, ...) are mapped through
+      COLUMN_RENAME, case-insensitively.
+    - Every other column is lowercased (Country -> country,
+      Latitude -> latitude, ...). Previously these kept their capital
+      letter, a blank lowercase twin was added, and the blank one won —
+      silently wiping country/location/taxon/latitude/longitude.
+    - --rename entries (matched case-insensitively) win over both.
+    - Already-converted sheets (sample_ID / plate_name / well) pass
+      through unchanged, so the function is idempotent.
     """
-    id_col = find_col(df.columns, "sample_id")
-    if id_col is None:
-        raise ValueError(
-            "--sample-name-from-id was requested but no 'sample_id' column "
-            f"was found. Columns present: {df.columns.tolist()}"
+    extra = {snake(k): v for k, v in (extra_rename or {}).items()}
+    new_cols = []
+    for c in df.columns:
+        key = snake(c)
+        if key in extra:
+            new_cols.append(extra[key])
+        else:
+            new_cols.append(COLUMN_RENAME.get(key, key))
+    df = df.copy()
+    df.columns = new_cols
+    return dedupe_columns(df)
+
+
+def to_ampseeker_frame(
+    df: pd.DataFrame,
+    ref_cols: list,
+    extra_rename: dict = None,
+    sample_name_from_id: bool = True,
+    keep_extra: bool = True,
+) -> pd.DataFrame:
+    """Turn a raw (or already converted) [Data] frame into AmpSeeker's
+    column layout: the model's columns first, in the model's order, then
+    (with keep_extra) any additional metadata columns from the sheet.
+    """
+    df = normalise_columns(df, extra_rename)
+    ref_cols = ["sample_id" if snake(c) == "sample_id" else snake(c) for c in ref_cols]
+
+    for col in METADATA_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    missing = [c for c in ref_cols if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"Input sheet is missing columns required by the model sheet: {missing}. "
+            f"Input columns after renaming: {df.columns.tolist()}"
         )
-    name_col = find_col(df.columns, "sample_name")
-    if name_col is None:
-        # No sample_name column yet — create one from sample_id.
-        df["sample_name"] = df[id_col]
-    else:
-        df[name_col] = df[id_col]
-    return df
+
+    if sample_name_from_id:
+        # Keep the original short name; bcl2fastq names FASTQs after
+        # sample_name, so sample_name is set to sample_id to make FASTQ
+        # file names match the sample IDs.
+        if "sample_name" in df.columns and "sample_name_original" not in df.columns:
+            if df["sample_name"].ne(df["sample_id"]).any():
+                df["sample_name_original"] = df["sample_name"]
+        df["sample_name"] = df["sample_id"]
+
+    bad = df["sample_id"].isna() | df["sample_id"].astype(str).str.strip().eq("")
+    if bad.any():
+        raise ValueError(
+            f"{bad.sum()} row(s) have a missing 'sample_id' after conversion:\n{df[bad]}"
+        )
+    dup = df["sample_id"].duplicated(keep=False)
+    if dup.any():
+        raise ValueError(
+            f"Duplicate sample_id(s) within one sheet: {sorted(df.loc[dup, 'sample_id'].unique())}"
+        )
+
+    for col in ("latitude", "longitude"):
+        vals = df[col].astype(str).str.strip()
+        bad_num = vals.ne("") & pd.to_numeric(vals, errors="coerce").isna()
+        if bad_num.any():
+            print(f"Warning: {bad_num.sum()} non-numeric value(s) in '{col}': "
+                  f"{sorted(vals[bad_num].unique())[:10]}")
+
+    extras = []
+    if keep_extra:
+        extras = [c for c in df.columns
+                  if c not in ref_cols and c not in DROP_EXTRA and df[c].astype(str).str.strip().ne("").any()]
+    out = df[ref_cols + extras].copy()
+
+    # AmpSeeker's own SampleSheet parser splits [Data] lines on bare commas
+    # and doesn't understand CSV quoting, so commas inside values would
+    # shift columns. Replace them.
+    for c in out.columns:
+        s = out[c].astype(str)
+        if s.str.contains(",").any():
+            print(f"Note: replaced ',' with ';' inside values of column '{c}'.")
+            out[c] = s.str.replace(",", ";", regex=False)
+    return out
 
 
-def force_lowercase_sample_id(df: pd.DataFrame, ref_cols: list) -> tuple:
-    """Force whatever the model calls the ID column (e.g. 'sample_ID') to be
-    output as literal lowercase 'sample_id', regardless of the model sheet's
-    own casing. Returns (df, updated_ref_cols).
-    """
-    id_col = find_col(df.columns, "sample_id")
-    if id_col and id_col != "sample_id":
-        df = df.rename(columns={id_col: "sample_id"})
-    ref_cols = ["sample_id" if c.lower() == "sample_id" else c for c in ref_cols]
-    return df, ref_cols
+def read_model_columns(model_path: Path) -> list:
+    """Model may be an Illumina-style sheet (.csv with [Data]) or a flat TSV."""
+    if model_path.suffix.lower() == ".tsv":
+        return pd.read_csv(model_path, sep="\t", nrows=0).columns.tolist()
+    _, model_df = read_samplesheet(model_path)
+    return model_df.columns.tolist()
 
 
 def convert(
@@ -208,52 +274,24 @@ def convert(
     extra_rename: dict,
     sample_name_from_id: bool,
     pad_header: bool,
+    keep_extra: bool = True,
 ):
-    header, df = read_samplesheet(input_path)
+    backup_path = input_path.with_name(f"backup_{input_path.name}")
+    in_place = output_path.resolve() == input_path.resolve()
 
-    # Rename Illumina columns to AmpSeeker's expected names.
-    # CLI-supplied --rename entries take priority over the defaults.
-    rename_map = {**COLUMN_RENAME, **extra_rename}
-    df = df.rename(columns=rename_map)
-    df = dedupe_columns(df)
+    source = input_path
+    if in_place and backup_path.exists():
+        # Already converted once: re-convert from the untouched original
+        # instead of the already-converted copy, and never overwrite the
+        # backup (doing so would destroy the only original).
+        source = backup_path
+        print(f"Found existing {backup_path.name}; converting from it (backup left untouched).")
 
-    # Add any missing metadata columns, blank.
-    for col in METADATA_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
+    header, df = read_samplesheet(source)
+    ref_cols = read_model_columns(model_path)
+    df = to_ampseeker_frame(df, ref_cols, extra_rename, sample_name_from_id, keep_extra)
 
-    # Load the model/example sheet to get the exact target column set.
-    _, sheet_model = read_samplesheet(model_path)
-    ref_cols = sheet_model.columns.tolist()
-
-    # Match case-insensitively (e.g. model's 'sample_ID' vs our 'sample_id'),
-    # then rename df's columns to the model's exact spelling.
-    col_rename, missing = match_case_insensitive(df.columns, ref_cols)
-    if missing:
-        raise KeyError(
-            f"Input sheet is missing columns required by the model sheet: {missing}. "
-            f"Input columns after renaming: {df.columns.tolist()}"
-        )
-    df = df.rename(columns=col_rename)
-
-    if sample_name_from_id:
-        df = apply_sample_name_from_id(df)
-
-    # Always output the ID column as lowercase 'sample_id', regardless of
-    # how the model sheet happens to spell it (e.g. 'sample_ID').
-    df, ref_cols = force_lowercase_sample_id(df, ref_cols)
-
-    df = df[ref_cols]  # keep only + reorder to match the model exactly
-
-    # Defensive check: don't silently write a sheet with missing sample IDs.
-    if df["sample_id"].isna().any() or (df["sample_id"].astype(str).str.strip() == "").any():
-        bad_rows = df[df["sample_id"].isna() | (df["sample_id"].astype(str).str.strip() == "")]
-        raise ValueError(
-            f"{len(bad_rows)} row(s) have a missing 'sample_id' after conversion:\n{bad_rows}"
-        )
-
-    if backup and output_path == input_path:
-        backup_path = input_path.with_name(f"backup_{input_path.name}")
+    if backup and in_place and not backup_path.exists():
         shutil.copy2(input_path, backup_path)
         print(f"Backed up original to: {backup_path}")
 
@@ -263,63 +301,46 @@ def convert(
     )
     print(f"Wrote converted samplesheet to: {output_path}")
     print(f"Rows: {len(df)}  Columns: {df.columns.tolist()}")
+    for col in METADATA_COLUMNS:
+        n_blank = df[col].astype(str).str.strip().eq("").sum()
+        if n_blank:
+            print(f"  {col}: {n_blank}/{len(df)} blank")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Convert an Illumina SampleSheet.csv to AmpSeeker's expected format."
     )
-    parser.add_argument(
-        "-i", "--input", required=True, type=Path,
-        help="Path to the raw Illumina SampleSheet.csv",
-    )
-    parser.add_argument(
-        "-m", "--model", required=True, type=Path,
-        help="Path to the model/example samplesheet defining the target columns "
-             "(e.g. resources/exampleSampleSheet.csv)",
-    )
-    parser.add_argument(
-        "-o", "--output", type=Path, default=None,
-        help="Path to write the converted samplesheet. "
-             "Defaults to overwriting --input (with a backup made first).",
-    )
-    parser.add_argument(
-        "--no-backup", action="store_true",
-        help="Skip creating a backup_<name> copy when writing in place.",
-    )
-    parser.add_argument(
-        "--rename", type=str, default="",
-        help="Extra/override column renames as 'Old=New,Old2=New2' "
-             "(applied on top of, and taking priority over, the built-in "
-             "Illumina -> AmpSeeker defaults). Useful for sheets with "
-             "nonstandard column names.",
-    )
-    parser.add_argument(
-        "--sample-name-from-id", dest="sample_name_from_id",
-        action="store_true", default=True,
-        help="Set sample_name values equal to sample_id values (default: on). "
-             "Use when Sample_Name in the raw sheet is blank/unreliable and "
-             "the meaningful identifier lives in Sample_ID.",
-    )
-    parser.add_argument(
-        "--no-sample-name-from-id", dest="sample_name_from_id",
-        action="store_false",
-        help="Keep the original Sample_Name values instead of overwriting "
-             "them with sample_id.",
-    )
-    parser.add_argument(
-        "--pad-header", dest="pad_header",
-        action="store_true", default=True,
-        help="Pad every preserved header line with trailing commas so the "
-             "whole file is a rectangular grid matching the data section's "
-             "column count (default: on) — this is what AmpSeeker expects "
-             "and what Excel produces when it re-saves a ragged CSV.",
-    )
-    parser.add_argument(
-        "--no-pad-header", dest="pad_header",
-        action="store_false",
-        help="Leave header lines at their original (ragged) width.",
-    )
+    parser.add_argument("-i", "--input", required=True, type=Path,
+                        help="Path to the raw Illumina SampleSheet.csv")
+    parser.add_argument("-m", "--model", required=True, type=Path,
+                        help="Model/example samplesheet defining the target columns "
+                             "(e.g. resources/exampleSampleSheet.csv)")
+    parser.add_argument("-o", "--output", type=Path, default=None,
+                        help="Where to write the converted samplesheet. "
+                             "Defaults to overwriting --input (with a backup made first).")
+    parser.add_argument("--no-backup", action="store_true",
+                        help="Skip creating a backup_<name> copy when writing in place.")
+    parser.add_argument("--rename", type=str, default="",
+                        help="Extra/override column renames as 'Old=New,Old2=New2' "
+                             "(case-insensitive; takes priority over the defaults).")
+    parser.add_argument("--sample-name-from-id", dest="sample_name_from_id",
+                        action="store_true", default=True,
+                        help="Set sample_name = sample_id (default: on), so bcl2fastq "
+                             "names FASTQs after sample_id. The original value is kept "
+                             "in 'sample_name_original'.")
+    parser.add_argument("--no-sample-name-from-id", dest="sample_name_from_id",
+                        action="store_false",
+                        help="Keep the original Sample_Name values.")
+    parser.add_argument("--keep-extra", dest="keep_extra", action="store_true", default=True,
+                        help="Append sheet columns not in the model (e.g. description, "
+                             "project, sample_name_original) after the model columns (default: on).")
+    parser.add_argument("--no-keep-extra", dest="keep_extra", action="store_false",
+                        help="Output exactly the model's columns.")
+    parser.add_argument("--pad-header", dest="pad_header", action="store_true", default=True,
+                        help="Pad header lines with trailing commas to a rectangular grid (default: on).")
+    parser.add_argument("--no-pad-header", dest="pad_header", action="store_false",
+                        help="Leave header lines at their original (ragged) width.")
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -341,6 +362,7 @@ def main():
             extra_rename=extra_rename,
             sample_name_from_id=args.sample_name_from_id,
             pad_header=args.pad_header,
+            keep_extra=args.keep_extra,
         )
     except (ValueError, KeyError) as e:
         sys.exit(f"Conversion failed: {e}")

@@ -1,8 +1,7 @@
 name: AmpSeeker-qc
 channels:
-  - bioconda
   - conda-forge
-  - anaconda
+  - bioconda
 dependencies:
   # Snakemake's wrapper mechanism runs this env's own python to import
   # snakemake's modules (which use PEP 604 "X | Y" union syntax internally),
